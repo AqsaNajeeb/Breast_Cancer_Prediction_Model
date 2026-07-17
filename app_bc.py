@@ -1,20 +1,33 @@
 # -*- coding: utf-8 -*-
-"""app_bc.py — Breast Cancer Diagnosis Dashboard"""
+"""app_bc.py — Breast Cancer Diagnosis Dashboard (fully self-contained)
+
+This version does NOT read data.csv or _model.pkl from disk at runtime.
+The dataset is loaded from scikit-learn's bundled Breast Cancer Wisconsin
+(Diagnostic) dataset — the same underlying data as the Kaggle
+"uciml/breast-cancer-wisconsin-data" CSV, just shipped inside the sklearn
+package instead of as a separate file — and the Logistic Regression
+pipeline is trained live, in-memory, the first time the app runs
+(and then cached so it's instant afterwards).
+
+Nothing external needs to exist next to this file for it to work.
+"""
 
 # ============================================
 # 🧬 Breast Cancer Diagnosis Prediction Dashboard
-# Using XGBoost + Streamlit + Built-in Dataset
+# Using Logistic Regression (Pipeline) + Streamlit
+# Dataset + Model are both embedded / trained in-app
 # ============================================
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-import os
-import joblib
-import xgboost as xgb
-from xgboost import XGBClassifier
 import matplotlib.pyplot as plt
 import seaborn as sns
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, ConfusionMatrixDisplay
 
 # ============================================
@@ -43,15 +56,6 @@ st.markdown("""
             font-size: 18px;
             margin-top: 5px;
         }
-        .metric-card {
-            background-color: #ffffff;
-            padding: 20px;
-            border-radius: 12px;
-            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
-            text-align: center;
-        }
-
-        /* Make tabs larger, clearer, and visually appealing */
         .stTabs [data-baseweb="tab-list"] {
             justify-content: center;
             gap: 12px;
@@ -72,68 +76,6 @@ st.markdown("""
             background-color: #4B0082 !important;
             color: white !important;
         }
-    </style>
-""", unsafe_allow_html=True)
-
-# ============================================
-# HEADER
-# ============================================
-st.markdown('<h1 class="main-title">🧬 Breast Cancer Diagnosis Dashboard</h1>', unsafe_allow_html=True)
-st.markdown('<p class="subheader">Built with Streamlit | Powered by XGBoost | Embedded Dataset</p>', unsafe_allow_html=True)
-st.markdown("---")
-
-# ============================================
-# LOAD DATASET
-# ============================================
-DATA_PATH = "data.csv"
-
-if not os.path.exists(DATA_PATH):
-    st.error("⚠️ Dataset file 'data.csv' not found. Please make sure it exists in the project folder.")
-    st.stop()
-
-data = pd.read_csv(DATA_PATH)
-data = data.drop(columns=[c for c in ["Unnamed: 32", "id"] if c in data.columns], errors='ignore')
-
-# Encode target if categorical
-if data["diagnosis"].dtype == "object":
-    data["diagnosis"] = data["diagnosis"].map({"M": 1, "B": 0})
-
-X = data.drop("diagnosis", axis=1)
-y = data["diagnosis"]
-
-# ============================================
-# LOAD TRAINED MODEL (JOBLIB ONLY)
-# ============================================
-MODEL_PATH = "_model.pkl"
-
-if not os.path.exists(MODEL_PATH) or os.path.getsize(MODEL_PATH) == 0:
-    st.error("⚠️ Model file '_model.pkl' not found or empty. Please train and save it first using joblib.dump().")
-    st.stop()
-
-try:
-    model = joblib.load(MODEL_PATH)
-except Exception as e:
-    st.error(f"❌ Failed to load model file:\n\n**{e}**")
-    st.stop()
-
-# ============================================
-# MODEL EVALUATION
-# ============================================
-try:
-    y_pred = model.predict(X)
-except Exception as e:
-    st.error(f"⚠️ Error during prediction:\n\n{e}")
-    st.stop()
-
-accuracy = accuracy_score(y, y_pred)
-f1 = f1_score(y, y_pred)
-cm = confusion_matrix(y, y_pred)
-
-# ============================================
-# DASHBOARD SUMMARY CARDS
-# ============================================
-st.markdown("""
-    <style>
         .metric-card {
             background: linear-gradient(145deg, #e6e0ff, #ffffff);
             padding: 22px;
@@ -163,13 +105,102 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# ============================================
+# HEADER
+# ============================================
+st.markdown('<h1 class="main-title">🧬 Breast Cancer Diagnosis Dashboard</h1>', unsafe_allow_html=True)
+st.markdown('<p class="subheader">Built with Streamlit | Powered by Logistic Regression | Dataset & Model Embedded</p>', unsafe_allow_html=True)
+st.markdown("---")
+
+
+# ============================================
+# EMBEDDED DATASET (no data.csv needed)
+# ============================================
+@st.cache_data
+def load_data() -> pd.DataFrame:
+    """Loads the Wisconsin Breast Cancer diagnostic dataset that ships
+    inside scikit-learn — identical measurements to the Kaggle CSV
+    (radius/texture/perimeter/... mean, se, worst for each cell nucleus).
+    """
+    raw = load_breast_cancer()
+
+    # sklearn's feature names look like "mean radius", "radius error",
+    # "worst radius" — rename to match the familiar radius_mean,
+    # radius_se, radius_worst convention from the original CSV.
+    def rename(col: str) -> str:
+        col = col.replace("concave points", "concave_points")
+        if col.startswith("mean "):
+            base = col.replace("mean ", "")
+            suffix = "_mean"
+        elif col.endswith(" error"):
+            base = col.replace(" error", "")
+            suffix = "_se"
+        elif col.startswith("worst "):
+            base = col.replace("worst ", "")
+            suffix = "_worst"
+        else:
+            base = col
+            suffix = ""
+        return base.replace(" ", "_") + suffix
+
+    df = pd.DataFrame(raw.data, columns=[rename(c) for c in raw.feature_names])
+
+    # sklearn encodes target as 0=malignant, 1=benign — flip it so it
+    # matches the original CSV convention (M=1, B=0).
+    df["diagnosis"] = 1 - raw.target
+    return df
+
+
+data = load_data()
+X = data.drop("diagnosis", axis=1)
+y = data["diagnosis"]
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+
+# ============================================
+# EMBEDDED MODEL (no _model.pkl needed)
+# ============================================
+@st.cache_resource
+def train_model(X_train, y_train) -> Pipeline:
+    """Trains the StandardScaler + LogisticRegression pipeline once and
+    caches it in memory for the life of the app session/server.
+    """
+    pipeline = Pipeline([
+        ("scaler", StandardScaler()),
+        ("classifier", LogisticRegression(random_state=42, max_iter=1000)),
+    ])
+    pipeline.fit(X_train, y_train)
+    return pipeline
+
+
+model = train_model(X_train, y_train)
+
+# ============================================
+# MODEL EVALUATION (on held-out test split)
+# ============================================
+y_pred = model.predict(X_test)
+accuracy = accuracy_score(y_test, y_pred)
+f1 = f1_score(y_test, y_pred)
+cm = confusion_matrix(y_test, y_pred)
+
+# Full-dataset predictions, used only for the Overview tab's confidence
+# / breakdown charts so they reflect the whole embedded dataset.
+y_pred_full = model.predict(X)
+y_proba_full = model.predict_proba(X)[:, 1]
+
+# ============================================
+# DASHBOARD SUMMARY CARDS
+# ============================================
 st.markdown("### 📊 Model Overview Summary")
 
 col1, col2, col3, col4 = st.columns(4)
 col1.markdown(f"<div class='metric-card'><h3>Dataset Size</h3><h2>{data.shape[0]}</h2><p>Samples</p></div>", unsafe_allow_html=True)
 col2.markdown(f"<div class='metric-card'><h3>Features</h3><h2>{data.shape[1]-1}</h2><p>Input Variables</p></div>", unsafe_allow_html=True)
-col3.markdown(f"<div class='metric-card'><h3>Accuracy</h3><h2>{accuracy*100:.2f}%</h2><p>Model Performance</p></div>", unsafe_allow_html=True)
-col4.markdown(f"<div class='metric-card'><h3>F1 Score</h3><h2>{f1:.2f}</h2><p>Balanced Measure</p></div>", unsafe_allow_html=True)
+col3.markdown(f"<div class='metric-card'><h3>Test Accuracy</h3><h2>{accuracy*100:.2f}%</h2><p>Model Performance</p></div>", unsafe_allow_html=True)
+col4.markdown(f"<div class='metric-card'><h3>Test F1 Score</h3><h2>{f1:.2f}</h2><p>Balanced Measure</p></div>", unsafe_allow_html=True)
 
 st.markdown("---")
 
@@ -184,42 +215,39 @@ tab1, tab2, tab3 = st.tabs(["🏠 Overview", "📊 Data Insights", "🤖 Predict
 with tab1:
     st.header("🏠 Overview")
 
-    # --- Top Section: Text + Confusion Matrix ---
     col1, col2 = st.columns([2, 1])
     with col1:
         st.write("""
         This dashboard predicts whether a breast tumor is **Malignant** or **Benign**
-        using a fine-tuned **XGBoost Classifier** trained on diagnostic cell data.
-        
-        The overview below highlights the model's performance through its predictions,
-        confidence levels, and output distribution.
+        using a **Logistic Regression** classifier (with feature scaling), trained on
+        the Wisconsin Breast Cancer diagnostic dataset.
+
+        Both the dataset and the trained model are embedded directly in this app —
+        there's nothing to upload or configure. Metrics below are measured on a
+        held-out 20% test split.
         """)
     with col2:
         fig, ax = plt.subplots(figsize=(4.5, 4.5))
         disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["Benign", "Malignant"])
         disp.plot(ax=ax, cmap="Purples", colorbar=False)
-        plt.title("Confusion Matrix")
+        plt.title("Confusion Matrix (Test Set)")
         st.pyplot(fig)
 
-    # --- Bottom Section: Two Tiny Side-by-Side Graphs ---
     st.markdown("### 📈 Model Confidence & Output Distribution")
 
     col3, col4 = st.columns(2)
 
-    # --- Confidence Distribution (Left) ---
     with col3:
-        y_proba = model.predict_proba(X)[:, 1]
         fig, ax = plt.subplots(figsize=(3.8, 3.8))
-        sns.histplot(y_proba, bins=15, kde=True, color="#9370db", ax=ax)
+        sns.histplot(y_proba_full, bins=15, kde=True, color="#9370db", ax=ax)
         plt.xlabel("Confidence (Malignant)", fontsize=8)
         plt.ylabel("Count", fontsize=8)
-        plt.title("Confidence Levels", fontsize=9)
+        plt.title("Confidence Levels (Full Dataset)", fontsize=9)
         plt.tight_layout()
         st.pyplot(fig)
 
-    # --- Prediction Outcome Pie Chart (Right) ---
     with col4:
-        pred_counts = pd.Series(y_pred).value_counts()
+        pred_counts = pd.Series(y_pred_full).value_counts().reindex([0, 1]).fillna(0)
         fig, ax = plt.subplots(figsize=(3.8, 3.8))
         ax.pie(
             pred_counts,
@@ -232,14 +260,12 @@ with tab1:
         plt.title("Prediction Breakdown", fontsize=9)
         st.pyplot(fig)
 
-
     st.markdown("---")
-
-    st.markdown("<p style='text-align:center; color:gray; font-size:14px;'>Developed by <b>Aqsa Najeeb</b> | Powered by Streamlit + XGBoost</p>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center; color:gray; font-size:14px;'>Developed by <b>Aqsa Najeeb</b> | Powered by Streamlit + Logistic Regression</p>", unsafe_allow_html=True)
 
 
 # ============================================
-# TAB 2: DATA INSIGHTS (Feature Importance moved here)
+# TAB 2: DATA INSIGHTS
 # ============================================
 with tab2:
     st.header("📊 Data Insights")
@@ -256,33 +282,33 @@ with tab2:
     with c2:
         st.markdown("#### 🔥 Correlation Heatmap")
         fig, ax = plt.subplots(figsize=(8, 6))
-        sns.heatmap(data.corr(), cmap="Purples", center=0)
+        sns.heatmap(data.corr(numeric_only=True), cmap="Purples", center=0)
         plt.title("Feature Correlation Matrix")
         st.pyplot(fig)
 
     st.markdown("### 🧠 Top Correlated Features")
-    corr_target = data.corr()["diagnosis"].sort_values(ascending=False)[1:11]
+    corr_target = data.corr(numeric_only=True)["diagnosis"].sort_values(ascending=False)[1:11]
     st.bar_chart(corr_target)
 
-    # === FEATURE IMPORTANCE SECTION (Moved here only) ===
-    st.markdown("### 🔑 Feature Importance (XGBoost)")
+    st.markdown("### 🔑 Feature Importance (Logistic Regression Coefficients)")
 
-    xgb_model = None
-    if isinstance(model, XGBClassifier):
-        xgb_model = model
-    elif hasattr(model, "named_steps"):
-        for step in model.named_steps.values():
-            if isinstance(step, XGBClassifier):
-                xgb_model = step
-                break
+    logreg_step = model.named_steps.get("classifier")
+    if logreg_step is not None:
+        coefs = pd.Series(logreg_step.coef_[0], index=list(X.columns))
+        top_coefs = coefs.reindex(coefs.abs().sort_values(ascending=False).index)[:15]
 
-    if xgb_model is not None:
         fig, ax = plt.subplots(figsize=(8, 6))
-        xgb.plot_importance(xgb_model, ax=ax, importance_type="weight", color="purple")
-        plt.title("Top Important Features")
+        colors = ["#9370db" if v > 0 else "#b19cd9" for v in top_coefs.values]
+        ax.barh(top_coefs.index[::-1], top_coefs.values[::-1], color=colors[::-1])
+        ax.set_xlabel("Coefficient (impact on Malignant probability)")
+        ax.set_title("Top 15 Features by |Coefficient|")
+        plt.tight_layout()
         st.pyplot(fig)
+
+        st.caption("Positive bars push predictions toward **Malignant**; negative bars push toward **Benign**. "
+                   "Coefficients are on the scaled-feature space (StandardScaler), so magnitudes are comparable across features.")
     else:
-        st.warning("⚠️ Could not extract XGBClassifier for feature importance plot.")
+        st.warning("⚠️ Could not extract the LogisticRegression step for the coefficient plot.")
 
 # ============================================
 # TAB 3: PREDICTION INTERFACE
@@ -300,7 +326,12 @@ with tab3:
             )
 
     if st.button("🔍 Predict"):
-        input_df = pd.DataFrame([input_data])
+        input_df = pd.DataFrame([input_data])[list(X.columns)]
+
+        if input_df.isna().any().any():
+            st.error("⚠️ Please fill in all fields — one or more values are missing.")
+            st.stop()
+
         try:
             pred = model.predict(input_df)[0]
         except Exception as e:
